@@ -40,7 +40,7 @@ func TestValidateHeader(t *testing.T) {
 	historyNetwork, err := genHistoryNetwork(":7891", nil)
 	require.NoError(t, err)
 	for _, entry := range entrys {
-		err = historyNetwork.validateContent(entry.key, entry.value)
+		_, err = historyNetwork.validateContent(entry.key, entry.value)
 		require.NoError(t, err)
 
 		headerWithProof, err := DecodeBlockHeaderWithProof(entry.value)
@@ -79,15 +79,15 @@ func testReceiptsAndBody(entryMap map[string]contentEntry, t *testing.T) {
 
 	headerEntry := entryMap["header"]
 	// validateContents will store the content
-	err = historyNetwork.validateContents([][]byte{headerEntry.key}, [][]byte{headerEntry.value})
+	_, err = historyNetwork.validateContents([][]byte{headerEntry.key}, [][]byte{headerEntry.value})
 	require.NoError(t, err)
 
 	bodyEntry := entryMap["body"]
-	err = historyNetwork.validateContent(bodyEntry.key, bodyEntry.value)
+	_, err = historyNetwork.validateContent(bodyEntry.key, bodyEntry.value)
 	require.NoError(t, err)
 
 	receiptsEntry := entryMap["receipts"]
-	err = historyNetwork.validateContent(receiptsEntry.key, receiptsEntry.value)
+	_, err = historyNetwork.validateContent(receiptsEntry.key, receiptsEntry.value)
 	require.NoError(t, err)
 	// test for portalReceipts encode and decode
 	portalReceipts := new(PortalReceipts)
@@ -238,7 +238,7 @@ func TestValidateContents(t *testing.T) {
 		keys = append(keys, hexutil.MustDecode(entry.ContentKey))
 		values = append(values, hexutil.MustDecode(entry.ContentValue))
 	}
-	err = historyNetwork.validateContents(keys, values)
+	_, err = historyNetwork.validateContents(keys, values)
 	require.NoError(t, err)
 }
 

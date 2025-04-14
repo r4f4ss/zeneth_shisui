@@ -8,6 +8,7 @@ import (
 	"math/big"
 	"time"
 
+	gcommon "github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/protolambda/zrnt/eth2/beacon/capella"
 	"github.com/protolambda/zrnt/eth2/beacon/common"
@@ -35,6 +36,14 @@ const (
 	// EpochAccumulatorType ContentType = 0x03
 )
 
+const activeSyncBlocks = 100
+
+// limit of active sync queue: it can block temporarily in case its size is less than activeSyncBlocks*offerQueueSize
+const syncQueueLimit = 20 * 50 * activeSyncBlocks
+
+var hashZero = hexutil.MustDecode("0x0000000000000000000000000000000000000000000000000000000000000000")
+var ErrHashZero = errors.New("hash zero")
+
 var (
 	ErrWithdrawalHashIsNotEqual = errors.New("withdrawals hash is not equal")
 	ErrTxHashIsNotEqual         = errors.New("tx hash is not equal")
@@ -44,6 +53,7 @@ var (
 	ErrHeaderWithProofIsInvalid = errors.New("header proof is invalid")
 	ErrInvalidBlockHash         = errors.New("invalid block hash")
 	ErrInvalidBlockNumber       = errors.New("invalid block number")
+	ErrContentStored            = errors.New("content stored")
 )
 
 var emptyReceiptHash = hexutil.MustDecode("0x56e81f171bcc55a6ff8345e692c0f86e5b48e01b996cadc001622fb5e363b421")
@@ -76,6 +86,7 @@ type Network struct {
 	log                        log.Logger
 	client                     *rpc.Client
 	spec                       *common.Spec
+	syncQueue                  chan []*types.Header
 }
 
 func NewHistoryNetwork(portalProtocol *portalwire.PortalProtocol, accu *MasterAccumulator, client *rpc.Client) *Network {
@@ -90,6 +101,7 @@ func NewHistoryNetwork(portalProtocol *portalwire.PortalProtocol, accu *MasterAc
 		log:                        log.New("sub-protocol", "history"),
 		spec:                       configs.Mainnet,
 		historicalRootsAccumulator: &historicalRootsAccumulator,
+		syncQueue:                  make(chan []*types.Header, syncQueueLimit),
 	}
 }
 
@@ -99,6 +111,9 @@ func (h *Network) Start() error {
 		return err
 	}
 	go h.processContentLoop(h.closeCtx)
+	if h.portalProtocol.ActiveSync {
+		go h.processActiveSyncLoop(h.closeCtx)
+	}
 	h.log.Debug("history network start successfully")
 	return nil
 }
@@ -265,6 +280,27 @@ func (h *Network) GetReceipts(blockHash []byte) ([]*types.Receipt, error) {
 		return receipts, nil
 	}
 	return nil, storage.ErrContentNotFound
+}
+
+func (h *Network) activeSync(hash []byte) (*types.Header, error) {
+	h.log.Trace("active sync", "hash", hexutil.Encode(hash))
+
+	header, err := h.GetBlockHeader(hash)
+	if err != nil {
+		return header, err
+	}
+
+	_, err = h.GetBlockBody(hash)
+	if err != nil {
+		return header, err
+	}
+
+	_, err = h.GetReceipts(hash)
+	if err != nil {
+		return header, err
+	}
+
+	return header, nil
 }
 
 func (h *Network) verifyHeader(header *types.Header, proof []byte) (bool, error) {
@@ -531,6 +567,70 @@ func ToPortalReceipts(receipts []*types.Receipt) (*PortalReceipts, error) {
 	return &PortalReceipts{Receipts: res}, nil
 }
 
+func (h *Network) recursiveActiveSync(ctx context.Context, header *types.Header, count int) {
+	if count == 0 {
+		return
+	}
+
+	parenthash := &header.ParentHash
+	uncleHash := &header.UncleHash
+
+	//find content parent block
+	if parenthash.Cmp(gcommon.Hash(hashZero)) == 0 {
+		h.log.Error("Got first block, can not find parent hash")
+		return
+	}
+
+	header, err := h.activeSync(parenthash.Bytes())
+	if header == nil {
+		h.log.Error("fail to get header", "err", err)
+		return
+	} else if errors.Is(err, ErrContentOutOfRange) {
+		h.log.Info("Active sync finished, database full")
+		h.portalProtocol.ActiveSync = false
+		close(h.syncQueue)
+		return
+	}
+
+	//find content uncle block
+	if uncleHash.Cmp(gcommon.Hash(hashZero)) != 0 {
+		headerUncle, err := h.activeSync(uncleHash.Bytes())
+		if headerUncle == nil {
+			h.log.Error("fail to get uncle header", "err", err)
+		} else if errors.Is(err, ErrContentOutOfRange) {
+			h.log.Info("Active sync finished, database full")
+			h.portalProtocol.ActiveSync = false
+			close(h.syncQueue)
+			return
+		}
+	}
+
+	select {
+	case <-ctx.Done():
+		return
+	default:
+		go h.recursiveActiveSync(ctx, header, count-1)
+	}
+}
+
+func (h *Network) processActiveSyncLoop(ctx context.Context) {
+	h.log.Info("active sync started")
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case headers, ok := <-h.syncQueue:
+			if !ok {
+				return
+			}
+
+			for _, header := range headers {
+				go h.recursiveActiveSync(ctx, header, activeSyncBlocks)
+			}
+		}
+	}
+}
+
 func (h *Network) processContentLoop(ctx context.Context) {
 	contentChan := h.portalProtocol.GetContent()
 	for {
@@ -538,10 +638,14 @@ func (h *Network) processContentLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case contentElement := <-contentChan:
-			err := h.validateContents(contentElement.ContentKeys, contentElement.Contents)
+			headers, err := h.validateContents(contentElement.ContentKeys, contentElement.Contents)
 			if err != nil {
 				h.log.Error("validate content failed", "err", err)
 				continue
+			}
+
+			if h.portalProtocol.ActiveSync {
+				h.syncQueue <- headers
 			}
 
 			go func(ctx context.Context) {
@@ -562,88 +666,90 @@ func (h *Network) processContentLoop(ctx context.Context) {
 	}
 }
 
-func (h *Network) validateContent(contentKey []byte, content []byte) error {
+func (h *Network) validateContent(contentKey []byte, content []byte) (*types.Header, error) {
 	switch ContentType(contentKey[0]) {
 	case BlockHeaderType:
 		headerWithProof, err := DecodeBlockHeaderWithProof(content)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		header, err := DecodeBlockHeader(headerWithProof.Header)
 		if err != nil {
-			return err
+			return header, err
 		}
 		if !bytes.Equal(header.Hash().Bytes(), contentKey[1:]) {
-			return ErrInvalidBlockHash
+			return header, ErrInvalidBlockHash
 		}
 		valid, err := h.verifyHeader(header, headerWithProof.Proof)
 		if err != nil {
-			return err
+			return header, err
 		}
 		if !valid {
-			return ErrHeaderWithProofIsInvalid
+			return header, ErrHeaderWithProofIsInvalid
 		}
-		return err
+		return header, err
 	case BlockBodyType:
 		header, err := h.GetBlockHeader(contentKey[1:])
 		if err != nil {
-			return err
+			return header, err
 		}
 		_, err = ValidateBlockBodyBytes(content, header)
-		return err
+		return header, err
 	case ReceiptsType:
 		header, err := h.GetBlockHeader(contentKey[1:])
 		if err != nil {
-			return err
+			return header, err
 		}
 		if bytes.Equal(header.ReceiptHash.Bytes(), emptyReceiptHash) {
 			if len(content) > 0 {
-				return fmt.Errorf("content should be empty, but received %v", content)
+				return header, fmt.Errorf("content should be empty, but received %v", content)
 			}
-			return nil
+			return header, nil
 		}
 		_, err = ValidatePortalReceiptsBytes(content, header.ReceiptHash.Bytes())
-		return err
+		return header, err
 	case BlockHeaderNumberType:
 		headerWithProof, err := DecodeBlockHeaderWithProof(content)
 		if err != nil {
-			return err
+			return nil, err
 		}
 		header, err := DecodeBlockHeader(headerWithProof.Header)
 		if err != nil {
-			return err
+			return header, err
 		}
 		blockNumber := view.Uint64View(0)
 		err = blockNumber.Deserialize(codec.NewDecodingReader(bytes.NewReader(contentKey[1:]), uint64(len(contentKey[1:]))))
 		if err != nil {
-			return err
+			return header, err
 		}
 		if header.Number.Cmp(big.NewInt(int64(blockNumber))) != 0 {
-			return ErrInvalidBlockNumber
+			return header, ErrInvalidBlockNumber
 		}
 		valid, err := h.verifyHeader(header, headerWithProof.Proof)
 		if err != nil {
-			return err
+			return header, err
 		}
 		if !valid {
-			return ErrHeaderWithProofIsInvalid
+			return header, ErrHeaderWithProofIsInvalid
 		}
-		return err
+		return header, err
 	}
-	return errors.New("unknown content type")
+	return nil, errors.New("unknown content type")
 }
 
-func (h *Network) validateContents(contentKeys [][]byte, contents [][]byte) error {
+func (h *Network) validateContents(contentKeys [][]byte, contents [][]byte) ([]*types.Header, error) {
+	var headers []*types.Header
 	for i, content := range contents {
 		contentKey := contentKeys[i]
-		err := h.validateContent(contentKey, content)
+		header, err := h.validateContent(contentKey, content)
+		headers = append(headers, header)
 		if err != nil {
-			return fmt.Errorf("content validate failed with content key %x and content %x, err is %v", contentKey, content, err)
+			return headers, fmt.Errorf("content validate failed with content key %x and content %x, err is %v", contentKey, content, err)
 		}
 		contentId := h.portalProtocol.ToContentId(contentKey)
 		_ = h.portalProtocol.Put(contentKey, contentId, content)
 	}
-	return nil
+	return headers, nil
 }
 
 func ValidateBlockHeaderBytes(headerBytes []byte, blockHash []byte) (*types.Header, error) {

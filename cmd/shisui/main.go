@@ -50,6 +50,7 @@ var (
 		utils.PortalDataCapacityFlag,
 		utils.PortalLogLevelFlag,
 		utils.PortalLogFormatFlag,
+		utils.PortalActiveSyncFlag,
 	}
 	metricsFlags = []cli.Flag{
 		utils.MetricsEnabledFlag,

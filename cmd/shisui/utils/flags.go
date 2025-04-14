@@ -162,6 +162,13 @@ Please note that --` + MetricsHTTPFlag.Name + ` must be set to start the server.
 		Category: flags.PortalNetworkCategory,
 	}
 
+	PortalActiveSyncFlag = &cli.BoolFlag{
+		Name:     "active.sync",
+		Usage:    "[EXPERIMENTAL] Use active synchronization, fetch new blocks instead of only wait for offers",
+		Category: flags.PortalNetworkCategory,
+		Value:    false,
+	}
+
 	PortalPrivateKeyFlag = &cli.StringFlag{
 		Name:     "private.key",
 		Usage:    "Private key of p2p node, hex format without 0x prifix",

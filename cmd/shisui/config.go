@@ -36,6 +36,7 @@ func getPortalConfig(ctx *cli.Context) (*portal.Config, error) {
 	} else {
 		config.PortalProtocolConfig.ListenAddr = port
 	}
+	config.PortalProtocolConfig.ActiveSync = ctx.Bool(utils.PortalActiveSyncFlag.Name)
 
 	trustedBlockRoot := ctx.String(utils.PortalTrustedBlockRootFlag.Name)
 	if trustedBlockRoot != "" {

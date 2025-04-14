@@ -203,6 +203,8 @@ type PortalProtocolConfig struct {
 	NAT                   nat.Interface
 	clock                 mclock.Clock
 	TrustedBlockRoot      []byte
+
+	ActiveSync bool
 }
 
 func DefaultPortalProtocolConfig() *PortalProtocolConfig {
@@ -215,6 +217,7 @@ func DefaultPortalProtocolConfig() *PortalProtocolConfig {
 		NodeDBPath:            "",
 		clock:                 mclock.System{},
 		TrustedBlockRoot:      make([]byte, 0),
+		ActiveSync:            false,
 	}
 }
 
@@ -257,6 +260,8 @@ type PortalProtocol struct {
 	disableTableInitCheck bool
 	currentVersions       protocolVersions
 	inTransferMap         sync.Map
+
+	ActiveSync bool
 }
 
 func defaultContentIdFunc(contentKey []byte) []byte {
@@ -303,6 +308,7 @@ func NewPortalProtocol(config *PortalProtocolConfig, protocolId ProtocolId, priv
 		clock:             config.clock,
 		Utp:               utp,
 		currentVersions:   currentVersions,
+		ActiveSync:        config.ActiveSync,
 	}
 
 	for _, setOpt := range setOpts {

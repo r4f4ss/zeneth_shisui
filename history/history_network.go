@@ -44,6 +44,8 @@ const syncQueueLimit = 20 * 50 * activeSyncBlocks
 var hashZero = hexutil.MustDecode("0x0000000000000000000000000000000000000000000000000000000000000000")
 var ErrHashZero = errors.New("hash zero")
 
+var ErrOverlapActiveSync = errors.New("active sync overlap with other offer")
+
 var (
 	ErrWithdrawalHashIsNotEqual = errors.New("withdrawals hash is not equal")
 	ErrTxHashIsNotEqual         = errors.New("tx hash is not equal")
@@ -285,19 +287,46 @@ func (h *Network) GetReceipts(blockHash []byte) ([]*types.Receipt, error) {
 func (h *Network) activeSync(hash []byte) (*types.Header, error) {
 	h.log.Trace("active sync", "hash", hexutil.Encode(hash))
 
-	header, err := h.GetBlockHeader(hash)
-	if err != nil {
-		return header, err
+	//test if the content is already in db
+	contentKey := newContentKey(BlockHeaderType, hash).encode()
+	contentId := h.portalProtocol.ToContentId(contentKey)
+	headerTest, _ := h.portalProtocol.Get(contentKey, contentId)
+
+	contentKey = newContentKey(BlockBodyType, hash).encode()
+	contentId = h.portalProtocol.ToContentId(contentKey)
+	bodyTest, _ := h.portalProtocol.Get(contentKey, contentId)
+
+	contentKey = newContentKey(ReceiptsType, hash).encode()
+	contentId = h.portalProtocol.ToContentId(contentKey)
+	receiptsTest, _ := h.portalProtocol.Get(contentKey, contentId)
+
+	if headerTest != nil && bodyTest != nil && receiptsTest != nil {
+		return nil, ErrOverlapActiveSync
 	}
 
-	_, err = h.GetBlockBody(hash)
-	if err != nil {
-		return header, err
+	var header *types.Header
+	var err error
+
+	//get content from network
+	if headerTest == nil {
+		header, err = h.GetBlockHeader(hash)
+		if err != nil {
+			return header, err
+		}
 	}
 
-	_, err = h.GetReceipts(hash)
-	if err != nil {
-		return header, err
+	if bodyTest == nil {
+		_, err = h.GetBlockBody(hash)
+		if err != nil {
+			return header, err
+		}
+	}
+
+	if receiptsTest == nil {
+		_, err = h.GetReceipts(hash)
+		if err != nil {
+			return header, err
+		}
 	}
 
 	return header, nil
@@ -590,6 +619,11 @@ func (h *Network) recursiveActiveSync(ctx context.Context, header *types.Header,
 		h.portalProtocol.ActiveSync = false
 		close(h.syncQueue)
 		return
+	} else if errors.Is(err, ErrOverlapActiveSync) {
+		h.log.Info("Active sync finished due to overlap", "err", err)
+		h.portalProtocol.ActiveSync = false
+		close(h.syncQueue)
+		return
 	}
 
 	//find content uncle block
@@ -599,6 +633,11 @@ func (h *Network) recursiveActiveSync(ctx context.Context, header *types.Header,
 			h.log.Error("fail to get uncle header", "err", err)
 		} else if errors.Is(err, ErrContentOutOfRange) {
 			h.log.Info("Active sync finished, database full")
+			h.portalProtocol.ActiveSync = false
+			close(h.syncQueue)
+			return
+		} else if errors.Is(err, ErrOverlapActiveSync) {
+			h.log.Info("Active sync finished due to overlap", "err", err)
 			h.portalProtocol.ActiveSync = false
 			close(h.syncQueue)
 			return

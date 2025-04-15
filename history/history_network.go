@@ -36,10 +36,10 @@ const (
 	// EpochAccumulatorType ContentType = 0x03
 )
 
-const activeSyncBlocks = 100
+const aggressivitySyncBlocks = 1000
 
-// limit of active sync queue: it can block temporarily in case its size is less than activeSyncBlocks*offerQueueSize
-const syncQueueLimit = 20 * 50 * activeSyncBlocks
+// limit of active sync queue: it can block temporarily in case its size is less than offerQueueSize
+const syncQueueLimit = 20 * 50
 
 var hashZero = hexutil.MustDecode("0x0000000000000000000000000000000000000000000000000000000000000000")
 var ErrHashZero = errors.New("hash zero")
@@ -663,8 +663,10 @@ func (h *Network) processActiveSyncLoop(ctx context.Context) {
 				return
 			}
 
+			radius := h.portalProtocol.Radius().Float64()
+			radiusPercentage := radius / storage.MaxDistance.Float64()
 			for _, header := range headers {
-				go h.recursiveActiveSync(ctx, header, activeSyncBlocks)
+				go h.recursiveActiveSync(ctx, header, int(radiusPercentage*aggressivitySyncBlocks))
 			}
 		}
 	}

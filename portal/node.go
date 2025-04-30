@@ -110,15 +110,15 @@ func NewNode(config *Config) (*Node, error) {
 	}
 
 	// Initialize services based on config
-	if slices.Contains(config.Networks, portalwire.History.Name()) {
-		err = node.initHistoryNetwork()
+	if slices.Contains(config.Networks, portalwire.Beacon.Name()) {
+		err = node.initBeaconNetwork()
 		if err != nil {
 			return nil, err
 		}
 	}
 
-	if slices.Contains(config.Networks, portalwire.Beacon.Name()) {
-		err = node.initBeaconNetwork()
+	if slices.Contains(config.Networks, portalwire.History.Name()) {
+		err = node.initHistoryNetwork()
 		if err != nil {
 			return nil, err
 		}
@@ -362,7 +362,7 @@ func (n *Node) initHistoryNetwork() error {
 	}
 
 	client := rpc.DialInProc(n.rpcServer)
-	n.historyNetwork = history.NewHistoryNetwork(protocol, &accumulator, client)
+	n.historyNetwork = history.NewHistoryNetwork(protocol, &accumulator, client, n.beaconNetwork)
 	return nil
 }
 

@@ -8,6 +8,7 @@ import (
 	"math/big"
 	"time"
 
+	gcommon "github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/panjf2000/ants/v2"
 	"github.com/protolambda/zrnt/eth2/beacon/capella"
@@ -80,9 +81,12 @@ type Network struct {
 	log                        log.Logger
 	client                     *rpc.Client
 	spec                       *common.Spec
+	externalOracle             *beacon.Network
+	head                       *gcommon.Hash
+	ephemeral                  *ephemeralStore
 }
 
-func NewHistoryNetwork(portalProtocol *portalwire.PortalProtocol, accu *MasterAccumulator, client *rpc.Client) *Network {
+func NewHistoryNetwork(portalProtocol *portalwire.PortalProtocol, accu *MasterAccumulator, client *rpc.Client, externalOracleBeacon *beacon.Network) *Network {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	historicalRootsAccumulator := NewHistoricalRootsAccumulator(configs.Mainnet)
@@ -95,6 +99,8 @@ func NewHistoryNetwork(portalProtocol *portalwire.PortalProtocol, accu *MasterAc
 		spec:                       configs.Mainnet,
 		historicalRootsAccumulator: &historicalRootsAccumulator,
 		client:                     client,
+		externalOracle:             externalOracleBeacon,
+		ephemeral:                  NewEphemeralStore(),
 	}
 }
 
@@ -544,10 +550,19 @@ func (h *Network) processContentLoop(ctx context.Context) {
 			return
 		case contentElement := <-contentChan:
 			err := antsPool.Submit(func() {
-				err := h.validateContents(contentElement.ContentKeys, contentElement.Contents)
-				if err != nil {
-					h.log.Error("validate contents failed", "err", err)
-					return
+				//ephemeral type offers only contain content keys for ephemeral headers
+				if ContentType(contentElement.ContentKeys[0][0]) == OfferEphemeralType {
+					err := h.ephemeral.handleContents(contentElement.ContentKeys, contentElement.Contents)
+					if err != nil {
+						h.log.Error("handle ephemeral contents failed", "err", err)
+						return
+					}
+				} else {
+					err := h.validateContents(contentElement.ContentKeys, contentElement.Contents)
+					if err != nil {
+						h.log.Error("validate contents failed", "err", err)
+						return
+					}
 				}
 				go func() {
 					var gossippedNum int
@@ -686,4 +701,19 @@ func decodeEpochAccumulator(data []byte) (*EpochAccumulator, error) {
 	epochAccu := new(EpochAccumulator)
 	err := epochAccu.UnmarshalSSZ(data)
 	return epochAccu, err
+}
+
+func (h *Network) updateHead() {
+	var lcUpdates []capella.LightClientUpdate
+	lcUpdateSpec, err := h.externalOracle.GetUpdates(1, 2)
+	lcUpdates = make([]capella.LightClientUpdate, len(lcUpdateSpec))
+	if err != nil {
+		return
+	}
+	for i, u := range lcUpdateSpec {
+		var buf bytes.Buffer
+		u.Serialize(h.spec, codec.NewEncodingWriter(&buf))
+		dec := codec.NewDecodingReader(bytes.NewReader(buf.Bytes()), uint64(len(buf.Bytes())))
+		lcUpdates[i].Deserialize(h.spec, dec)
+	}
 }

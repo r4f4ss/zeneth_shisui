@@ -8,6 +8,7 @@ import (
 	"math/big"
 	"time"
 
+	"github.com/OffchainLabs/go-bitfield"
 	gcommon "github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/panjf2000/ants/v2"
@@ -83,14 +84,13 @@ type Network struct {
 	spec                       *common.Spec
 	externalOracle             *beacon.Network
 	head                       *gcommon.Hash
-	ephemeral                  *ephemeralStore
 }
 
 func NewHistoryNetwork(portalProtocol *portalwire.PortalProtocol, accu *MasterAccumulator, client *rpc.Client, externalOracleBeacon *beacon.Network) *Network {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	historicalRootsAccumulator := NewHistoricalRootsAccumulator(configs.Mainnet)
-	return &Network{
+	n := &Network{
 		portalProtocol:             portalProtocol,
 		masterAccumulator:          accu,
 		closeCtx:                   ctx,
@@ -100,8 +100,13 @@ func NewHistoryNetwork(portalProtocol *portalwire.PortalProtocol, accu *MasterAc
 		historicalRootsAccumulator: &historicalRootsAccumulator,
 		client:                     client,
 		externalOracle:             externalOracleBeacon,
-		ephemeral:                  NewEphemeralStore(),
 	}
+	n.portalProtocol.SetIsEphemeralOfferFunc(isEphemeralOfferType)
+	n.portalProtocol.SetIsEphemeralFindContentFunc(isEphemeralFindContentType)
+	n.portalProtocol.SetFilterEphemeralContentKeys(filterEphemeralContentKeys)
+	n.portalProtocol.SetHandleEphemeralFindContent(n.handleEphemeralFindContent)
+
+	return n
 }
 
 func (h *Network) Start() error {
@@ -551,8 +556,8 @@ func (h *Network) processContentLoop(ctx context.Context) {
 		case contentElement := <-contentChan:
 			err := antsPool.Submit(func() {
 				//ephemeral type offers only contain content keys for ephemeral headers
-				if ContentType(contentElement.ContentKeys[0][0]) == OfferEphemeralType {
-					err := h.ephemeral.handleContents(contentElement.ContentKeys, contentElement.Contents)
+				if isEphemeralOfferType(contentElement.ContentKeys[0]) {
+					err := h.handleEphemeralContents(contentElement.ContentKeys, contentElement.Contents)
 					if err != nil {
 						h.log.Error("handle ephemeral contents failed", "err", err)
 						return
@@ -701,6 +706,31 @@ func decodeEpochAccumulator(data []byte) (*EpochAccumulator, error) {
 	epochAccu := new(EpochAccumulator)
 	err := epochAccu.UnmarshalSSZ(data)
 	return epochAccu, err
+}
+
+func isEphemeralOfferType(contentKey []byte) bool {
+	return ContentType(contentKey[0]) == OfferEphemeralType
+}
+
+func isEphemeralFindContentType(contentKey []byte) bool {
+	return ContentType(contentKey[0]) == FindContentEphemeralType
+}
+
+func filterEphemeralContentKeys(request *portalwire.Offer) (portalwire.CommonAccept, [][]byte) {
+	contentKeyBitlist := bitfield.NewBitlist(uint64(len(request.ContentKeys)))
+	acceptContentKeys := make([][]byte, 0)
+	for i, contentKey := range request.ContentKeys {
+		isHead := false
+		if isHead {
+			break
+		}
+		contentKeyBitlist.SetBitAt(uint64(i), true)
+		acceptContentKeys = append(acceptContentKeys, contentKey)
+	}
+	accept := &portalwire.Accept{
+		ContentKeys: contentKeyBitlist,
+	}
+	return accept, acceptContentKeys
 }
 
 func (h *Network) updateHead() {

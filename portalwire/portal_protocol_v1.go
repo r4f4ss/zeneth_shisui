@@ -107,6 +107,10 @@ func (p *PortalProtocol) getOrStoreHighestVersion(node *enode.Node) (uint8, erro
 
 // find the Accept.ContentKeys and the content keys to accept
 func (p *PortalProtocol) filterContentKeys(request *Offer, version uint8) (CommonAccept, [][]byte, error) {
+	if p.isEphemeralOffer(request.ContentKeys[0]) {
+		accept, acceptContentKeys := p.filterEphemeralContentKeys(request)
+		return accept, acceptContentKeys, nil
+	}
 	switch version {
 	case 0:
 		return p.filterContentKeysV0(request)

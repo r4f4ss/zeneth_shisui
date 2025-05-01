@@ -115,6 +115,13 @@ const Tag ClientTag = "shisui"
 
 var MaxDistance = hexutil.MustDecode("0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")
 
+// Maximum header length is 2048 bytes
+// Expects clients to store the full window of 8192 blocks of this data
+// 100 slots for reorgs
+// Max size in bytes is 2048 * (8192 + 100)
+// https://github.com/ethereum/portal-network-specs/blob/master/history/history-network.md#ephemeral-block-headers
+var headerStoreCacheSize = 2048 * (8192 + 100)
+
 var PortalBootnodes = []string{
 	// Trin team's bootnodes
 	"enr:-Jy4QIs2pCyiKna9YWnAF0zgf7bT0GzlAGoF8MEKFJOExmtofBIqzm71zDvmzRiiLkxaEJcs_Amr7XIhLI74k1rtlXICY5Z0IDAuMS4xLWFscGhhLjEtMTEwZjUwgmlkgnY0gmlwhKEjVaWJc2VjcDI1NmsxoQLSC_nhF1iRwsCw0n3J4jRjqoaRxtKgsEe5a-Dz7y0JloN1ZHCCIyg",
@@ -269,6 +276,12 @@ type PortalProtocol struct {
 	inTransferMap         sync.Map
 
 	versionsCache cache.Cache[*enode.Node, uint8]
+
+	isEphemeralOffer           func([]byte) bool
+	isEphemeralFindContentType func([]byte) bool
+	filterEphemeralContentKeys func(*Offer) (CommonAccept, [][]byte)
+	EphemeralHeaderCache       *fastcache.Cache
+	handleEphemeralFindContent func(*enode.Node, *net.UDPAddr, []byte) ([]byte, error)
 }
 
 func defaultContentIdFunc(contentKey []byte) []byte {
@@ -337,6 +350,7 @@ func NewPortalProtocol(config *PortalProtocolConfig, protocolId ProtocolId, priv
 	switch protocolId.Name() {
 	case "history":
 		protocol.PingExtensions = HistoryPingExtension{}
+		protocol.EphemeralHeaderCache = fastcache.New(headerStoreCacheSize)
 	case "state":
 		protocol.PingExtensions = StatePingExtension{}
 	case "beacon":
@@ -1012,10 +1026,18 @@ func (p *PortalProtocol) handleTalkRequest(node *enode.Node, addr *net.UDPAddr, 
 
 		return resp
 	case FINDCONTENT:
+		respEphemeral, errEphemeral := p.handleEphemeralFindContent(node, addr, msg)
+		if errEphemeral != nil {
+			p.Log.Debug("failed to unmarshal find ephemeral content request", "err", errEphemeral)
+		}
+
 		findContentRequest := &FindContent{}
 		err := findContentRequest.UnmarshalSSZ(msg[1:])
 		if err != nil {
 			p.Log.Error("failed to unmarshal find content request", "err", err)
+		}
+
+		if err != nil && errEphemeral != nil {
 			return nil
 		}
 
@@ -1023,13 +1045,17 @@ func (p *PortalProtocol) handleTalkRequest(node *enode.Node, addr *net.UDPAddr, 
 		if metrics.Enabled() {
 			p.portalMetrics.messagesReceivedFindContent.Mark(1)
 		}
-		resp, err := p.handleFindContent(node, addr, findContentRequest)
-		if err != nil {
-			p.Log.Error("failed to handle find content request", "err", err)
-			return nil
+
+		if errEphemeral != nil {
+			resp, err := p.handleFindContent(node, addr, findContentRequest)
+			if err != nil {
+				p.Log.Error("failed to handle find content request", "err", err)
+				return nil
+			}
+			return resp
 		}
 
-		return resp
+		return respEphemeral
 	case OFFER:
 		offerRequest := &Offer{}
 		err := offerRequest.UnmarshalSSZ(msg[1:])
@@ -2029,6 +2055,22 @@ func (p *PortalProtocol) Distance(a, b enode.ID) enode.ID {
 		res[i] = a[i] ^ b[i]
 	}
 	return res
+}
+
+func (p *PortalProtocol) SetIsEphemeralOfferFunc(isFunction func([]byte) bool) {
+	p.isEphemeralOffer = isFunction
+}
+
+func (p *PortalProtocol) SetIsEphemeralFindContentFunc(isFunction func([]byte) bool) {
+	p.isEphemeralFindContentType = isFunction
+}
+
+func (p *PortalProtocol) SetFilterEphemeralContentKeys(filterFunction func(*Offer) (CommonAccept, [][]byte)) {
+	p.filterEphemeralContentKeys = filterFunction
+}
+
+func (p *PortalProtocol) SetHandleEphemeralFindContent(handler func(*enode.Node, *net.UDPAddr, []byte) ([]byte, error)) {
+	p.handleEphemeralFindContent = handler
 }
 
 func inRange(nodeId enode.ID, nodeRadius *uint256.Int, contentId []byte) bool {

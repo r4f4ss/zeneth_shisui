@@ -8,7 +8,6 @@ import (
 	"math/big"
 	"time"
 
-	"github.com/OffchainLabs/go-bitfield"
 	gcommon "github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/common/hexutil"
 	"github.com/panjf2000/ants/v2"
@@ -101,9 +100,9 @@ func NewHistoryNetwork(portalProtocol *portalwire.PortalProtocol, accu *MasterAc
 		client:                     client,
 		externalOracle:             externalOracleBeacon,
 	}
-	n.portalProtocol.SetIsEphemeralOfferFunc(isEphemeralOfferType)
-	n.portalProtocol.SetIsEphemeralFindContentFunc(isEphemeralFindContentType)
-	n.portalProtocol.SetFilterEphemeralContentKeys(filterEphemeralContentKeys)
+	n.portalProtocol.SetIsEphemeralOfferFunc(n.isEphemeralOfferType)
+	n.portalProtocol.SetIsEphemeralFindContentFunc(n.isEphemeralFindContentType)
+	n.portalProtocol.SetFilterEphemeralContentKeys(n.filterEphemeralContentKeys)
 	n.portalProtocol.SetHandleEphemeralFindContent(n.handleEphemeralFindContent)
 
 	return n
@@ -556,7 +555,7 @@ func (h *Network) processContentLoop(ctx context.Context) {
 		case contentElement := <-contentChan:
 			err := antsPool.Submit(func() {
 				//ephemeral type offers only contain content keys for ephemeral headers
-				if isEphemeralOfferType(contentElement.ContentKeys[0]) {
+				if h.isEphemeralOfferType(contentElement.ContentKeys[0]) {
 					err := h.handleEphemeralContents(contentElement.ContentKeys, contentElement.Contents)
 					if err != nil {
 						h.log.Error("handle ephemeral contents failed", "err", err)
@@ -708,42 +707,17 @@ func decodeEpochAccumulator(data []byte) (*EpochAccumulator, error) {
 	return epochAccu, err
 }
 
-func isEphemeralOfferType(contentKey []byte) bool {
-	return ContentType(contentKey[0]) == OfferEphemeralType
-}
-
-func isEphemeralFindContentType(contentKey []byte) bool {
-	return ContentType(contentKey[0]) == FindContentEphemeralType
-}
-
-func filterEphemeralContentKeys(request *portalwire.Offer) (portalwire.CommonAccept, [][]byte) {
-	contentKeyBitlist := bitfield.NewBitlist(uint64(len(request.ContentKeys)))
-	acceptContentKeys := make([][]byte, 0)
-	for i, contentKey := range request.ContentKeys {
-		isHead := false
-		if isHead {
-			break
-		}
-		contentKeyBitlist.SetBitAt(uint64(i), true)
-		acceptContentKeys = append(acceptContentKeys, contentKey)
-	}
-	accept := &portalwire.Accept{
-		ContentKeys: contentKeyBitlist,
-	}
-	return accept, acceptContentKeys
-}
-
-func (h *Network) updateHead() {
-	var lcUpdates []capella.LightClientUpdate
-	lcUpdateSpec, err := h.externalOracle.GetUpdates(1, 2)
-	lcUpdates = make([]capella.LightClientUpdate, len(lcUpdateSpec))
-	if err != nil {
-		return
-	}
-	for i, u := range lcUpdateSpec {
-		var buf bytes.Buffer
-		u.Serialize(h.spec, codec.NewEncodingWriter(&buf))
-		dec := codec.NewDecodingReader(bytes.NewReader(buf.Bytes()), uint64(len(buf.Bytes())))
-		lcUpdates[i].Deserialize(h.spec, dec)
-	}
-}
+// func (h *Network) updateHead() {
+// 	var lcUpdates []capella.LightClientUpdate
+// 	lcUpdateSpec, err := h.externalOracle.GetUpdates(1, 2)
+// 	lcUpdates = make([]capella.LightClientUpdate, len(lcUpdateSpec))
+// 	if err != nil {
+// 		return
+// 	}
+// 	for i, u := range lcUpdateSpec {
+// 		var buf bytes.Buffer
+// 		u.Serialize(h.spec, codec.NewEncodingWriter(&buf))
+// 		dec := codec.NewDecodingReader(bytes.NewReader(buf.Bytes()), uint64(len(buf.Bytes())))
+// 		lcUpdates[i].Deserialize(h.spec, dec)
+// 	}
+// }

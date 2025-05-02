@@ -4,13 +4,14 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
-	"errors"
 	"fmt"
 	"net"
 
+	"github.com/OffchainLabs/go-bitfield"
 	gcommon "github.com/ethereum/go-ethereum/common"
-	"github.com/ethereum/go-ethereum/metrics"
+	"github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/p2p/enode"
+	"github.com/ethereum/go-ethereum/rlp"
 	"github.com/zen-eth/shisui/portalwire"
 	utp "github.com/zen-eth/utp-go"
 )
@@ -105,12 +106,37 @@ import (
 // 	return accept, acceptContentKeys
 // }
 
+func (h *Network) isEphemeralOfferType(contentKey []byte) bool {
+	return ContentType(contentKey[0]) == OfferEphemeralType
+}
+
+func (h *Network) isEphemeralFindContentType(contentKey []byte) bool {
+	return ContentType(contentKey[0]) == FindContentEphemeralType
+}
+
+func (h *Network) filterEphemeralContentKeys(request *portalwire.Offer) (portalwire.CommonAccept, [][]byte) {
+	contentKeyBitlist := bitfield.NewBitlist(uint64(len(request.ContentKeys)))
+	acceptContentKeys := make([][]byte, 0)
+	for i, contentKey := range request.ContentKeys {
+		isHead := false
+		if isHead {
+			break
+		}
+		contentKeyBitlist.SetBitAt(uint64(i), true)
+		acceptContentKeys = append(acceptContentKeys, contentKey)
+	}
+	accept := &portalwire.Accept{
+		ContentKeys: contentKeyBitlist,
+	}
+	return accept, acceptContentKeys
+}
+
 func (h *Network) handleEphemeralContents(contentKeys [][]byte, contents [][]byte) error {
 	var parentHash gcommon.Hash
 	gotHead := false
 	for i, content := range contents {
 		contentKey := contentKeys[i]
-		if !isEphemeralOfferType(contentKey) {
+		if !h.isEphemeralOfferType(contentKey) {
 			return fmt.Errorf("content key diferent of type Ephemeral: content key %x", contentKey)
 		}
 
@@ -159,8 +185,8 @@ func (h *Network) handleEphemeralFindContent(n *enode.Node, addr *net.UDPAddr, m
 		return nil, err
 	}
 
-	// contentOverhead := 1 + 1 // msg id + SSZ Union selector
-	// maxPayloadSize := maxPacketSize - talkRespOverhead - contentOverhead
+	contentOverhead := 1 + 1 // msg id + SSZ Union selector
+	maxPayloadSize := portalwire.MaxPacketSize - portalwire.TalkRespOverhead - contentOverhead
 	// enrOverhead := 4 // per added ENR, 4 bytes offset overhead
 	// // var err error
 	// contentKey := request.ContentKey
@@ -177,61 +203,36 @@ func (h *Network) handleEphemeralFindContent(n *enode.Node, addr *net.UDPAddr, m
 		return nil, portalwire.ErrContentNotFound
 	}
 
-	for i := request.AncestorCount; i > 0; i-- {
-
-	}
-
-	if err != nil && !errors.Is(err, ErrContentNotFound) && !errors.Is(err, ErrEphemeralContentNotFound) {
+	var pointer *types.Header
+	content = make([][]byte, request.AncestorCount+1, request.AncestorCount+1)
+	content[0] = head
+	err = pointer.UnmarshalJSON(head)
+	if err != nil {
 		return nil, err
 	}
-
-	if errors.Is(err, ErrContentNotFound) {
-		closestNodes := p.findNodesCloseToContent(contentId, portalFindnodesResultLimit)
-		for i, closeNode := range closestNodes {
-			if closeNode.ID() == n.ID() {
-				closestNodes = append(closestNodes[:i], closestNodes[i+1:]...)
-				break
-			}
+	for i := 1; i < int(request.AncestorCount)+1; i++ {
+		olderHash := pointer.ParentHash
+		head, ok = h.portalProtocol.EphemeralHeaderCache.HasGet(head, olderHash.Bytes())
+		if !ok {
+			break
 		}
-
-		enrs := p.truncateNodes(closestNodes, maxPayloadSize, enrOverhead)
-		// TODO fix when no content and no enrs found
-		if len(enrs) == 0 {
-			enrs = nil
-		}
-
-		enrsMsg := &Enrs{
-			Enrs: enrs,
-		}
-
-		p.Log.Trace(">> CONTENT_ENRS/"+p.protocolName, "protocol", p.protocolName, "source", addr, "enrs", enrsMsg)
-		if metrics.Enabled() {
-			p.portalMetrics.messagesSentContent.Mark(1)
-		}
-		var enrsMsgBytes []byte
-		enrsMsgBytes, err = enrsMsg.MarshalSSZ()
+		content[i] = head
+		err = pointer.UnmarshalJSON(head)
 		if err != nil {
 			return nil, err
 		}
+	}
 
-		contentMsgBytes := make([]byte, 0, len(enrsMsgBytes)+1)
-		contentMsgBytes = append(contentMsgBytes, ContentEnrsSelector)
-		contentMsgBytes = append(contentMsgBytes, enrsMsgBytes...)
-
-		talkRespBytes := make([]byte, 0, len(contentMsgBytes)+1)
-		talkRespBytes = append(talkRespBytes, CONTENT)
-		talkRespBytes = append(talkRespBytes, contentMsgBytes...)
-
-		return talkRespBytes, nil
-	} else if len(content) <= maxPayloadSize {
-		rawContentMsg := &Content{
-			Content: content,
+	if len(content) <= maxPayloadSize {
+		rawContentMsg := &EphemeralHeaderPayload{
+			Payload: content,
 		}
 
-		p.Log.Trace(">> CONTENT_RAW/"+p.protocolName, "protocol", p.protocolName, "source", addr, "content", rawContentMsg)
-		if metrics.Enabled() {
-			p.portalMetrics.messagesSentContent.Mark(1)
-		}
+		h.portalProtocol.Log.Trace(">> CONTENT_RAW/history", "protocol", "history", "source", addr, "content", rawContentMsg)
+		//TODO metrics
+		// if metrics.Enabled() {
+		// 	h.portalProtocol.PortalMetrics.messagesSentContent.Mark(1)
+		// }
 
 		var rawContentMsgBytes []byte
 		rawContentMsgBytes, err = rawContentMsg.MarshalSSZ()
@@ -240,16 +241,16 @@ func (h *Network) handleEphemeralFindContent(n *enode.Node, addr *net.UDPAddr, m
 		}
 
 		contentMsgBytes := make([]byte, 0, len(rawContentMsgBytes)+1)
-		contentMsgBytes = append(contentMsgBytes, ContentRawSelector)
+		contentMsgBytes = append(contentMsgBytes, portalwire.ContentRawSelector)
 		contentMsgBytes = append(contentMsgBytes, rawContentMsgBytes...)
 
 		talkRespBytes := make([]byte, 0, len(contentMsgBytes)+1)
-		talkRespBytes = append(talkRespBytes, CONTENT)
+		talkRespBytes = append(talkRespBytes, portalwire.CONTENT)
 		talkRespBytes = append(talkRespBytes, contentMsgBytes...)
 
 		return talkRespBytes, nil
 	} else {
-		connectionId := p.Utp.CidWithAddr(n, addr, false)
+		connectionId := h.portalProtocol.Utp.CidWithAddr(n, addr, false)
 
 		go func(bctx context.Context, connId *utp.ConnectionId) {
 			var conn *utp.UtpStream
@@ -260,58 +261,59 @@ func (h *Network) handleEphemeralFindContent(n *enode.Node, addr *net.UDPAddr, m
 				case <-bctx.Done():
 					return
 				default:
-					p.Log.Debug("will accept find content conn from: ", "nodeId", n.ID().String(), "source", addr, "connId", connId)
-					connectCtx, cancel = context.WithTimeout(bctx, defaultUTPConnectTimeout)
+					h.portalProtocol.Log.Debug("will accept find content conn from: ", "nodeId", n.ID().String(), "source", addr, "connId", connId)
+					connectCtx, cancel = context.WithTimeout(bctx, portalwire.DefaultUTPConnectTimeout)
 					defer cancel()
-					conn, err = p.Utp.AcceptWithCid(connectCtx, connectionId)
+					conn, err = h.portalProtocol.Utp.AcceptWithCid(connectCtx, connectionId)
 					if err != nil {
-						if metrics.Enabled() {
-							p.portalMetrics.utpOutFailConn.Inc(1)
-						}
-						p.Log.Error("failed to accept utp connection for handle find content", "connId", connectionId.Send, "err", err)
+						//TODo mettrics
+						// if metrics.Enabled() {
+						// 	h.portalProtocol.portalMetrics.utpOutFailConn.Inc(1)
+						// }
+						h.portalProtocol.Log.Error("failed to accept utp connection for handle find content", "connId", connectionId.Send, "err", err)
 						return
 					}
 
-					writeCtx, writeCancel := context.WithTimeout(bctx, defaultUTPWriteTimeout)
+					writeCtx, writeCancel := context.WithTimeout(bctx, portalwire.DefaultUTPWriteTimeout)
 					defer writeCancel()
-					content, err = p.encodeUtpContent(n, content)
+					content, err = h.encodeUtpEphemeralContent(content)
 					if err != nil {
-						if metrics.Enabled() {
-							p.portalMetrics.utpOutFailConn.Inc(1)
-						}
-						p.Log.Error("encode utp content failed", "err", err)
+						// if metrics.Enabled() {
+						// 	p.portalMetrics.utpOutFailConn.Inc(1)
+						// }
+						h.portalProtocol.Log.Error("encode utp content failed", "err", err)
 						return
 					}
 					var n int
 					n, err = conn.Write(writeCtx, content)
 					conn.Close()
 					if err != nil {
-						if metrics.Enabled() {
-							p.portalMetrics.utpOutFailWrite.Inc(1)
-						}
-						p.Log.Error("failed to write content to utp connection", "err", err)
+						// if metrics.Enabled() {
+						// 	p.portalMetrics.utpOutFailWrite.Inc(1)
+						// }
+						h.portalProtocol.Log.Error("failed to write content to utp connection", "err", err)
 						return
 					}
 
-					if metrics.Enabled() {
-						p.portalMetrics.utpOutSuccess.Inc(1)
-					}
-					p.Log.Trace("wrote content size to utp connection", "n", n)
+					// if metrics.Enabled() {
+					// 	p.portalMetrics.utpOutSuccess.Inc(1)
+					// }
+					h.portalProtocol.Log.Trace("wrote content size to utp connection", "n", n)
 					return
 				}
 			}
-		}(p.closeCtx, connectionId)
+		}(h.closeCtx, connectionId)
 
 		idBuffer := make([]byte, 2)
 		binary.BigEndian.PutUint16(idBuffer, connectionId.Send)
-		connIdMsg := &ConnectionId{
+		connIdMsg := &portalwire.ConnectionId{
 			Id: idBuffer,
 		}
 
-		p.Log.Trace(">> CONTENT_CONNECTION_ID/"+p.protocolName, "protocol", p.protocolName, "source", addr, "connId", connIdMsg)
-		if metrics.Enabled() {
-			p.portalMetrics.messagesSentContent.Mark(1)
-		}
+		h.portalProtocol.Log.Trace(">> CONTENT_CONNECTION_ID/history", "protocol", "history", "source", addr, "connId", connIdMsg)
+		// if metrics.Enabled() {
+		// 	p.portalMetrics.messagesSentContent.Mark(1)
+		// }
 		var connIdMsgBytes []byte
 		connIdMsgBytes, err = connIdMsg.MarshalSSZ()
 		if err != nil {
@@ -319,13 +321,41 @@ func (h *Network) handleEphemeralFindContent(n *enode.Node, addr *net.UDPAddr, m
 		}
 
 		contentMsgBytes := make([]byte, 0, len(connIdMsgBytes)+1)
-		contentMsgBytes = append(contentMsgBytes, ContentConnIdSelector)
+		contentMsgBytes = append(contentMsgBytes, portalwire.ContentConnIdSelector)
 		contentMsgBytes = append(contentMsgBytes, connIdMsgBytes...)
 
 		talkRespBytes := make([]byte, 0, len(contentMsgBytes)+1)
-		talkRespBytes = append(talkRespBytes, CONTENT)
+		talkRespBytes = append(talkRespBytes, portalwire.CONTENT)
 		talkRespBytes = append(talkRespBytes, contentMsgBytes...)
 
 		return talkRespBytes, nil
 	}
+}
+
+func (h *Network) encodeUtpEphemeralContent(w rlp.EncoderBuffer, data [][]byte) ([]byte, error) {
+
+	list := w.List()
+	list
+	w.WriteBytes(n.Key)
+	if n.Val != nil {
+		n.Val.encode(w)
+	} else {
+		_, _ = w.Write(rlp.EmptyString)
+	}
+	w.ListEnd(offset)
+
+	return encodeSingleContent(data), nil
+	return data, nil
+}
+
+func (n *fullNode) encode(w rlp.EncoderBuffer) {
+	offset := w.List()
+	for _, c := range n.Children {
+		if c != nil {
+			c.encode(w)
+		} else {
+			_, _ = w.Write(rlp.EmptyString)
+		}
+	}
+	w.ListEnd(offset)
 }

@@ -41,7 +41,7 @@ const (
 	// regular discv5 packet is assumed for size calculation.
 	// Regular message = IV + header + message
 	// talkResp message = rlp: [request-id, response]
-	talkRespOverhead = 16 + // IV size
+	TalkRespOverhead = 16 + // IV size
 		55 + // header size
 		1 + // talkResp msg id
 		3 + // rlp encoding outer list, max length will be encoded in 2 bytes
@@ -51,9 +51,9 @@ const (
 
 	portalFindnodesResultLimit = 32
 
-	defaultUTPConnectTimeout = 15 * time.Second
+	DefaultUTPConnectTimeout = 15 * time.Second
 
-	defaultUTPWriteTimeout = 60 * time.Second
+	DefaultUTPWriteTimeout = 60 * time.Second
 
 	defaultUTPReadTimeout = 60 * time.Second
 
@@ -77,7 +77,7 @@ const (
 
 	lookupRequestLimit = 3 // max requests against a single node during lookup
 
-	maxPacketSize = 1280
+	MaxPacketSize = 1280
 )
 
 const (
@@ -727,7 +727,7 @@ func (p *PortalProtocol) processOffer(target *enode.Node, resp []byte, request *
 				var contentsPayload []byte
 				contentsPayload = encodeContents(contents)
 
-				connctx, conncancel := context.WithTimeout(ctx, defaultUTPConnectTimeout)
+				connctx, conncancel := context.WithTimeout(ctx, DefaultUTPConnectTimeout)
 				defer conncancel()
 				conn, err = p.Utp.DialWithCid(connctx, target, connId)
 
@@ -745,7 +745,7 @@ func (p *PortalProtocol) processOffer(target *enode.Node, resp []byte, request *
 				}
 
 				var written int
-				writeCtx, writeCancel := context.WithTimeout(ctx, defaultUTPWriteTimeout)
+				writeCtx, writeCancel := context.WithTimeout(ctx, DefaultUTPWriteTimeout)
 				defer writeCancel()
 				written, err = conn.Write(writeCtx, contentsPayload)
 				conn.Close()
@@ -827,7 +827,7 @@ func (p *PortalProtocol) processContent(target *enode.Node, resp []byte) (byte, 
 		} else {
 			log.Debug("Node added to replacements list", "protocol", p.protocolName, "node", target.IP(), "port", target.UDP())
 		}
-		connctx, conncancel := context.WithTimeout(p.closeCtx, defaultUTPConnectTimeout)
+		connctx, conncancel := context.WithTimeout(p.closeCtx, DefaultUTPConnectTimeout)
 		defer conncancel()
 		connId := binary.BigEndian.Uint16(connIdMsg.Id)
 		conn, err := p.Utp.DialWithCid(connctx, target, connId)
@@ -1193,7 +1193,7 @@ func (p *PortalProtocol) handleFindNodes(fromAddr *net.UDPAddr, request *FindNod
 	nodes := p.collectTableNodes(fromAddr.IP, distances, portalFindnodesResultLimit)
 
 	nodesOverhead := 1 + 1 + 4 // msg id + total + container offset
-	maxPayloadSize := maxPacketSize - talkRespOverhead - nodesOverhead
+	maxPayloadSize := MaxPacketSize - TalkRespOverhead - nodesOverhead
 	enrOverhead := 4 // per added ENR, 4 bytes offset overhead
 
 	enrs := p.truncateNodes(nodes, maxPayloadSize, enrOverhead)
@@ -1223,7 +1223,7 @@ func (p *PortalProtocol) handleFindNodes(fromAddr *net.UDPAddr, request *FindNod
 
 func (p *PortalProtocol) handleFindContent(n *enode.Node, addr *net.UDPAddr, request *FindContent) ([]byte, error) {
 	contentOverhead := 1 + 1 // msg id + SSZ Union selector
-	maxPayloadSize := maxPacketSize - talkRespOverhead - contentOverhead
+	maxPayloadSize := MaxPacketSize - TalkRespOverhead - contentOverhead
 	enrOverhead := 4 // per added ENR, 4 bytes offset overhead
 	var err error
 	contentKey := request.ContentKey
@@ -1314,7 +1314,7 @@ func (p *PortalProtocol) handleFindContent(n *enode.Node, addr *net.UDPAddr, req
 					return
 				default:
 					p.Log.Debug("will accept find content conn from: ", "nodeId", n.ID().String(), "source", addr, "connId", connId)
-					connectCtx, cancel = context.WithTimeout(bctx, defaultUTPConnectTimeout)
+					connectCtx, cancel = context.WithTimeout(bctx, DefaultUTPConnectTimeout)
 					defer cancel()
 					conn, err = p.Utp.AcceptWithCid(connectCtx, connectionId)
 					if err != nil {
@@ -1325,7 +1325,7 @@ func (p *PortalProtocol) handleFindContent(n *enode.Node, addr *net.UDPAddr, req
 						return
 					}
 
-					writeCtx, writeCancel := context.WithTimeout(bctx, defaultUTPWriteTimeout)
+					writeCtx, writeCancel := context.WithTimeout(bctx, DefaultUTPWriteTimeout)
 					defer writeCancel()
 					content, err = p.encodeUtpContent(n, content)
 					if err != nil {
@@ -1424,7 +1424,7 @@ func (p *PortalProtocol) handleOffer(node *enode.Node, addr *net.UDPAddr, reques
 							}
 						}()
 						p.Log.Debug("will accept offer conn from: ", "source", addr, "connId", connId)
-						connectCtx, cancel := context.WithTimeout(bctx, defaultUTPConnectTimeout)
+						connectCtx, cancel := context.WithTimeout(bctx, DefaultUTPConnectTimeout)
 						defer cancel()
 						conn, err = p.Utp.AcceptWithCid(connectCtx, connectionId)
 						if err != nil {
